@@ -20,18 +20,40 @@ ID2LABEL = {v: k for k, v in LABEL2ID.items()}
 
 
 def build_vocab_from_file(train_file: str, max_samples: int = 100000) -> Vocab:
+    """根据 CSV 格式的 train.txt (guid,tag) 构建词表。
+
+    这里会使用 guid 到 data/{guid}.txt 中读取文本内容来统计词频。
+    """
     texts = []
     with open(train_file, "r", encoding="utf-8") as f:
+        first = True
         for i, line in enumerate(f):
             if i >= max_samples:
                 break
-            parts = line.strip().split("\t")
-            if len(parts) < 2:
+            line = line.strip()
+            if not line:
                 continue
-            text = parts[1]
-            texts.append(text)
+            # 跳过表头 guid,tag
+            if first and ("," in line) and ("guid" in line):
+                first = False
+                continue
+            first = False
+
+            parts = line.split(",")
+            if len(parts) < 1:
+                continue
+            guid = parts[0]
+            text_path = os.path.join(os.path.dirname(train_file), "data", f"{guid}.txt")
+            if not os.path.exists(text_path):
+                continue
+            with open(text_path, "r", encoding="utf-8") as tf:
+                text = tf.read().strip()
+            if text:
+                texts.append(text)
+
     vocab = Vocab()
-    vocab.build_from_texts(texts)
+    if texts:
+        vocab.build_from_texts(texts)
     return vocab
 
 

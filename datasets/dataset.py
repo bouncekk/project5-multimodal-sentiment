@@ -59,12 +59,14 @@ class Vocab:
 class MultimodalSentimentDataset(Dataset):
     """多模态（文本 + 图像）情感分类数据集。
 
-    期望的 `train.txt` 格式（制表符分隔，tab-separated）:
-        image_path \t text \t label
-    其中 label 取值为 {positive, neutral, negative} 之一。
+    期望的 `train.txt` 格式（CSV，逗号分隔）:
+        guid,label
+    其中 label 取值为 {positive, neutral, negative} 之一，对应 data 目录下的:
+        data/{guid}.jpg   图像文件
+        data/{guid}.txt   文本文件
 
-    对于 `test_without_label.txt`:
-        image_path \t text
+    对于 `test_without_label.txt`（没有标签）:
+        guid,null
     """
 
     LABEL2ID = {"negative": 0, "neutral": 1, "positive": 2}
@@ -87,20 +89,40 @@ class MultimodalSentimentDataset(Dataset):
         self.image_transform = image_transform
 
         with open(data_file, "r", encoding="utf-8") as f:
+            first = True
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
-                parts = line.split("\t")
+                # 跳过首行表头 "guid,tag"
+                if first and ("," in line) and ("guid" in line):
+                    first = False
+                    continue
+                first = False
+
+                parts = line.split(",")
+                if len(parts) < 2:
+                    continue
+
+                guid = parts[0]
+                # 构造图像与文本的相对路径，均位于 root_dir/data/ 下
+                img_path = os.path.join("data", f"{guid}.jpg")
+                text_path = os.path.join(self.root_dir, "data", f"{guid}.txt")
+
+                # 读取对应的文本内容
+                if os.path.exists(text_path):
+                    with open(text_path, "r", encoding="utf-8") as tf:
+                        text = tf.read().strip()
+                else:
+                    text = ""
+
                 if is_test:
-                    if len(parts) < 2:
-                        continue
-                    img_path, text = parts[0], parts[1]
+                    # 测试集没有真实标签
                     self.samples.append((img_path, text, None))
                 else:
-                    if len(parts) < 3:
+                    label_str = parts[1]
+                    if label_str not in self.LABEL2ID:
                         continue
-                    img_path, text, label_str = parts[0], parts[1], parts[2]
                     label_id = self.LABEL2ID[label_str]
                     self.samples.append((img_path, text, label_id))
 
