@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual env
+venv/
+.env/
+.project5/
+.project5-env/
+
+# Checkpoints / logs (按需添加)
+checkpoints/
