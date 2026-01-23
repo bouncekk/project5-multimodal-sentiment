@@ -109,9 +109,9 @@ class MultimodalSentimentDataset(Dataset):
                 img_path = os.path.join("data", f"{guid}.jpg")
                 text_path = os.path.join(self.root_dir, "data", f"{guid}.txt")
 
-                # 读取对应的文本内容
+                # 读取对应的文本内容，忽略无法用 UTF-8 解码的字符，避免因编码问题中断训练/推理
                 if os.path.exists(text_path):
-                    with open(text_path, "r", encoding="utf-8") as tf:
+                    with open(text_path, "r", encoding="utf-8", errors="ignore") as tf:
                         text = tf.read().strip()
                 else:
                     text = ""

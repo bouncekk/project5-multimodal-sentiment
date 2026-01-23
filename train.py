@@ -46,7 +46,8 @@ def build_vocab_from_file(train_file: str, max_samples: int = 100000) -> Vocab:
             text_path = os.path.join(os.path.dirname(train_file), "data", f"{guid}.txt")
             if not os.path.exists(text_path):
                 continue
-            with open(text_path, "r", encoding="utf-8") as tf:
+            # 文本文件可能不是严格的 UTF-8 编码，这里忽略无法解码的字符，避免报错中断训练
+            with open(text_path, "r", encoding="utf-8", errors="ignore") as tf:
                 text = tf.read().strip()
             if text:
                 texts.append(text)
