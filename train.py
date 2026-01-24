@@ -94,9 +94,11 @@ def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
 
 
 def get_data_loaders(args: argparse.Namespace, vocab: Vocab) -> Tuple[DataLoader, DataLoader]:
+    # ViT 期望输入经过 ImageNet 标准化
     image_transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
     ])
 
     train_data_path = os.path.join(args.data_dir, "train.txt")

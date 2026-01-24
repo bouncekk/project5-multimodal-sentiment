@@ -1,28 +1,40 @@
 import torch
 import torch.nn as nn
+from transformers import BertConfig, BertModel
 
 
 class TextEncoder(nn.Module):
-    """简单的文本编码器：Embedding + 双向 LSTM（BiLSTM）。
+    """基于 BERT 结构的文本编码器。
 
-    这是一个轻量级 baseline，后续可以替换成 BERT/中文 BERT 等更强的文本编码器。
+    这里使用 transformers 提供的 BertModel，但词表大小由当前任务的 Vocab 决定，
+    等价于一个从头训练的 BERT encoder，用于提取句子级别的表示。
     """
 
-    def __init__(self, vocab_size: int, embed_dim: int = 128, hidden_dim: int = 256, num_layers: int = 1, dropout: float = 0.1):
+    def __init__(self, vocab_size: int, embed_dim: int = 128, hidden_dim: int = 256, num_layers: int = 4, dropout: float = 0.1):
+        """参数保持与旧接口兼容，但内部改为 BERT 配置。
+
+        - vocab_size: 由 Vocab.size 决定
+        - hidden_dim: BERT 的 hidden_size
+        - num_layers: Transformer encoder 层数
+        - dropout: 隐层 dropout
+        """
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        self.lstm = nn.LSTM(
-            input_size=embed_dim,
+
+        # 为当前任务构建一个 BERT 配置（从头训练，而非加载预训练权重）
+        config = BertConfig(
+            vocab_size=vocab_size,
             hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=True,
-            dropout=dropout if num_layers > 1 else 0.0,
+            num_hidden_layers=num_layers,
+            num_attention_heads=max(1, hidden_dim // 64),  # 保证可被 head 数整除
+            intermediate_size=hidden_dim * 4,
+            hidden_dropout_prob=dropout,
+            attention_probs_dropout_prob=dropout,
         )
+        self.bert = BertModel(config)
 
     @property
     def output_dim(self) -> int:
-        return self.lstm.hidden_size * 2
+        return self.bert.config.hidden_size
 
     def forward(self, input_ids: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
         """参数:
@@ -32,17 +44,20 @@ class TextEncoder(nn.Module):
         返回:
         - features: (batch, output_dim)，每个样本的一条文本特征向量
         """
-        embedded = self.embedding(input_ids)  # (B, T, E)
 
-        # 将带 padding 的序列打包，便于 LSTM 按真实长度计算
-        lengths_cpu = lengths.cpu()
-        packed = nn.utils.rnn.pack_padded_sequence(
-            embedded, lengths_cpu, batch_first=True, enforce_sorted=False
-        )
-        packed_out, (h_n, _) = self.lstm(packed)
-        # h_n: (num_layers * 2, batch, hidden_dim)
-        h_n = h_n.view(self.lstm.num_layers, 2, input_ids.size(0), self.lstm.hidden_size)
-        # 取最后一层、两个方向的隐状态并拼接
-        last_layer_h = h_n[-1]  # (2, B, H)
-        features = torch.cat([last_layer_h[0], last_layer_h[1]], dim=-1)  # (B, 2H)
+        # 根据真实长度构造 attention mask: padding 位置为 0，其余为 1
+        batch_size, seq_len = input_ids.size()
+        device = input_ids.device
+        # (B, seq_len)
+        range_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
+        lengths_expanded = lengths.unsqueeze(1).expand(-1, seq_len)
+        attention_mask = (range_ids < lengths_expanded).long()
+
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        # 使用 [CLS] 位置的向量（pooler_output）作为句子级表示
+        if outputs.pooler_output is not None:
+            features = outputs.pooler_output  # (B, hidden_size)
+        else:
+            # 部分配置可能没有 pooler，这种情况下取 CLS token 的 hidden state
+            features = outputs.last_hidden_state[:, 0, :]
         return features

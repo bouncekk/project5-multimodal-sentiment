@@ -3,19 +3,31 @@ import torch.nn as nn
 
 
 class FusionModule(nn.Module):
-    """简单的文本-图像特征融合模块。
+    """使用跨模态注意力（Cross-Modal Attention）的文本-图像特征融合模块。
 
-    目前使用特征拼接（concatenation）+ 多层感知机（MLP）。
-    后续可以尝试更高级的融合方式，比如注意力、门控机制、双线性池化等。
+    当前实现采用「文本作为 Query，图像作为 Key/Value」的多头注意力，
+    然后对得到的融合向量再做一层前馈网络。
     """
 
-    def __init__(self, text_dim: int, image_dim: int, hidden_dim: int = 256, dropout: float = 0.1):
+    def __init__(self, text_dim: int, image_dim: int, hidden_dim: int = 256, dropout: float = 0.1, num_heads: int = 4):
         super().__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(text_dim + image_dim, hidden_dim),
+
+        self.text_proj = nn.Linear(text_dim, hidden_dim)
+        self.image_proj = nn.Linear(image_dim, hidden_dim)
+
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
         )
+
         self.output_dim = hidden_dim
 
     def forward(self, text_feat: torch.Tensor, image_feat: torch.Tensor) -> torch.Tensor:
@@ -26,5 +38,18 @@ class FusionModule(nn.Module):
         返回:
         - fused: (B, output_dim)，融合后的多模态特征
         """
-        x = torch.cat([text_feat, image_feat], dim=-1)
-        return self.fc(x)
+
+        # 投影到同一维度，构造长度为 1 的序列，便于使用 MultiheadAttention
+        # 形状均为 (B, 1, hidden_dim)
+        q = self.text_proj(text_feat).unsqueeze(1)
+        k = self.image_proj(image_feat).unsqueeze(1)
+        v = k
+
+        # 文本作为 Query，图像作为 Key/Value 的跨模态注意力
+        attn_output, _ = self.cross_attn(query=q, key=k, value=v)
+        # 去掉序列长度维度，得到 (B, hidden_dim)
+        fused = attn_output.squeeze(1)
+
+        # 前馈网络进一步变换
+        fused = self.ffn(fused)
+        return fused

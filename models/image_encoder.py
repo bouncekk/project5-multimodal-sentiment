@@ -1,28 +1,27 @@
 import torch
 import torch.nn as nn
-import torchvision.models as models
+from transformers import ViTModel, ViTConfig
 
 
 class ImageEncoder(nn.Module):
-    """图像编码器，使用一个较小的 CNN 骨干网络（默认 ResNet18）。
+    """图像编码器，使用 Vision Transformer (ViT) 作为骨干网络。
 
-    为了在作业环境中更快地训练，这里默认使用 pretrained=False，
-    如果网络环境允许、训练时间充足，可以将 pretrained=True 使用预训练权重。
+    默认使用 `google/vit-base-patch16-224-in21k` 的配置，可以选择是否加载预训练权重。
     """
 
-    def __init__(self, backbone: str = "resnet18", pretrained: bool = False, train_backbone: bool = True):
+    def __init__(self, model_name: str = "google/vit-base-patch16-224-in21k", pretrained: bool = True, train_backbone: bool = True):
         super().__init__()
-        if backbone == "resnet18":
-            base = models.resnet18(pretrained=pretrained)
-            out_dim = base.fc.in_features
-            modules = list(base.children())[:-1]  # remove classifier
-            self.backbone = nn.Sequential(*modules)
-            self._output_dim = out_dim
+
+        if pretrained:
+            self.vit = ViTModel.from_pretrained(model_name)
         else:
-            raise ValueError(f"Unsupported backbone: {backbone}")
+            config = ViTConfig()
+            self.vit = ViTModel(config)
+
+        self._output_dim = self.vit.config.hidden_size
 
         if not train_backbone:
-            for p in self.backbone.parameters():
+            for p in self.vit.parameters():
                 p.requires_grad = False
 
     @property
@@ -31,11 +30,16 @@ class ImageEncoder(nn.Module):
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         """参数:
-        - images: (B, 3, H, W)，输入图像张量
+        - images: (B, 3, H, W)，输入图像张量，需已 resize 到 224x224，并做归一化
 
         返回:
-        - features: (B, output_dim)，每张图像的一条特征向量
+        - features: (B, output_dim)，每张图像的一条 ViT 池化后的特征向量
         """
-        x = self.backbone(images)  # (B, C, 1, 1)
-        x = torch.flatten(x, 1)
-        return x
+        # ViTModel 期望输入参数名为 pixel_values
+        outputs = self.vit(pixel_values=images)
+        if outputs.pooler_output is not None:
+            feats = outputs.pooler_output  # (B, hidden_size)
+        else:
+            # 如果没有 pooler，则对 patch 维做平均池化
+            feats = outputs.last_hidden_state.mean(dim=1)
+        return feats
