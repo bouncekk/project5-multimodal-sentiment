@@ -10,3 +10,5 @@ venv/
 
 # Checkpoints / logs (按需添加)
 checkpoints/
+
+models--google--vit-base-patch16-224-in21k/
