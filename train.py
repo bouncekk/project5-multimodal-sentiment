@@ -64,7 +64,16 @@ def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
     image_encoder = ImageEncoder(model_name="google/vit-base-patch16-224-in21k", pretrained=True, train_backbone=True)
 
     fusion = FusionModule(text_dim=text_encoder.output_dim, image_dim=image_encoder.output_dim, hidden_dim=args.fusion_hidden_dim)
-    classifier = Classifier(input_dim=fusion.output_dim, num_classes=3, hidden_dim=args.cls_hidden_dim)
+
+    # 根据实验模态动态确定分类器输入维度
+    if args.modality == "text_only":
+        classifier_input_dim = text_encoder.output_dim
+    elif args.modality == "image_only":
+        classifier_input_dim = image_encoder.output_dim
+    else:  # both
+        classifier_input_dim = fusion.output_dim
+
+    classifier = Classifier(input_dim=classifier_input_dim, num_classes=3, hidden_dim=args.cls_hidden_dim)
 
     class MultiModalModel(nn.Module):
         def __init__(self, text_encoder, image_encoder, fusion, classifier):
