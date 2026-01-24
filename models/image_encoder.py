@@ -12,16 +12,10 @@ class ImageEncoder(nn.Module):
     def __init__(self, model_name: str = "google/vit-base-patch16-224-in21k", pretrained: bool = True, train_backbone: bool = True):
         super().__init__()
 
-        if pretrained:
-            # 优先尝试加载预训练权重；如果因无法访问 huggingface 等原因失败，则退回到本地随机初始化的 ViTConfig
-            try:
-                self.vit = ViTModel.from_pretrained(model_name)
-            except Exception:
-                config = ViTConfig()
-                self.vit = ViTModel(config)
-        else:
-            config = ViTConfig()
-            self.vit = ViTModel(config)
+        # 出于可复现性和环境限制考虑，这里不再尝试从 HuggingFace 下载预训练权重，
+        # 始终使用本地随机初始化的 ViTConfig。
+        config = ViTConfig()
+        self.vit = ViTModel(config)
 
         self._output_dim = self.vit.config.hidden_size
 
