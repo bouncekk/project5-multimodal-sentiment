@@ -13,7 +13,12 @@ class ImageEncoder(nn.Module):
         super().__init__()
 
         if pretrained:
-            self.vit = ViTModel.from_pretrained(model_name)
+            # 优先尝试加载预训练权重；如果因无法访问 huggingface 等原因失败，则退回到本地随机初始化的 ViTConfig
+            try:
+                self.vit = ViTModel.from_pretrained(model_name)
+            except Exception:
+                config = ViTConfig()
+                self.vit = ViTModel(config)
         else:
             config = ViTConfig()
             self.vit = ViTModel(config)
