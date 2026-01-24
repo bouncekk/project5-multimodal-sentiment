@@ -35,7 +35,8 @@ def build_model_from_ckpt(ckpt_path: str, vocab: Vocab, modality: str):
     args_dict = ckpt["args"]
 
     text_encoder = TextEncoder(vocab_size=vocab.size, embed_dim=args_dict["text_embed_dim"], hidden_dim=args_dict["text_hidden_dim"])
-    image_encoder = ImageEncoder(backbone="resnet18", pretrained=False, train_backbone=True)
+    # 使用 ViT 版本的图像编码器，保持与训练时一致
+    image_encoder = ImageEncoder(model_name="google/vit-base-patch16-224-in21k", pretrained=True, train_backbone=True)
     fusion = FusionModule(text_dim=text_encoder.output_dim, image_dim=image_encoder.output_dim, hidden_dim=args_dict["fusion_hidden_dim"])
 
     if modality == "text_only":

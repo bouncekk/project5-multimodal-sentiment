@@ -60,7 +60,8 @@ def build_vocab_from_file(train_file: str, max_samples: int = 100000) -> Vocab:
 
 def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
     text_encoder = TextEncoder(vocab_size=vocab.size, embed_dim=args.text_embed_dim, hidden_dim=args.text_hidden_dim)
-    image_encoder = ImageEncoder(backbone="resnet18", pretrained=False, train_backbone=True)
+    # 使用 ViT 版本的图像编码器
+    image_encoder = ImageEncoder(model_name="google/vit-base-patch16-224-in21k", pretrained=True, train_backbone=True)
 
     fusion = FusionModule(text_dim=text_encoder.output_dim, image_dim=image_encoder.output_dim, hidden_dim=args.fusion_hidden_dim)
     classifier = Classifier(input_dim=fusion.output_dim, num_classes=3, hidden_dim=args.cls_hidden_dim)
