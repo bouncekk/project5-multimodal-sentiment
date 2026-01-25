@@ -39,40 +39,69 @@ def build_model_from_ckpt(ckpt_path: str, vocab: Vocab, modality: str):
     image_encoder = ImageEncoder(model_name="google/vit-base-patch16-224-in21k", pretrained=True, train_backbone=True)
     fusion = FusionModule(text_dim=text_encoder.output_dim, image_dim=image_encoder.output_dim, hidden_dim=args_dict["fusion_hidden_dim"])
 
-    if modality == "text_only":
-        classifier_input_dim = text_encoder.output_dim
-    elif modality == "image_only":
-        classifier_input_dim = image_encoder.output_dim
-    else:
-        classifier_input_dim = fusion.output_dim
+    fusion_type = args_dict.get("fusion_type", "cross_attn")
 
-    classifier = Classifier(input_dim=classifier_input_dim, num_classes=3, hidden_dim=args_dict["cls_hidden_dim"])
+    if fusion_type == "late":
+        classifier_text = Classifier(input_dim=text_encoder.output_dim, num_classes=3, hidden_dim=args_dict["cls_hidden_dim"])
+        classifier_image = Classifier(input_dim=image_encoder.output_dim, num_classes=3, hidden_dim=args_dict["cls_hidden_dim"])
+        main_classifier = None
+    else:
+        if modality == "text_only":
+            classifier_input_dim = text_encoder.output_dim
+        elif modality == "image_only":
+            classifier_input_dim = image_encoder.output_dim
+        else:
+            if fusion_type == "early":
+                classifier_input_dim = text_encoder.output_dim + image_encoder.output_dim
+            else:
+                classifier_input_dim = fusion.output_dim
+
+        main_classifier = Classifier(input_dim=classifier_input_dim, num_classes=3, hidden_dim=args_dict["cls_hidden_dim"])
+        classifier_text = None
+        classifier_image = None
 
     class MultiModalModel(torch.nn.Module):
-        def __init__(self, text_encoder, image_encoder, fusion, classifier):
+        def __init__(self, text_encoder, image_encoder, fusion, main_classifier, classifier_text, classifier_image, fusion_type: str):
             super().__init__()
             self.text_encoder = text_encoder
             self.image_encoder = image_encoder
             self.fusion = fusion
-            self.classifier = classifier
+            self.main_classifier = main_classifier
+            self.classifier_text = classifier_text
+            self.classifier_image = classifier_image
+            self.fusion_type = fusion_type
 
         def forward(self, input_ids, lengths, images, modality: str = "both"):
             if modality == "text_only":
                 text_feat = self.text_encoder(input_ids, lengths)
-                logits = self.classifier(text_feat)
+                if self.fusion_type == "late" and self.classifier_text is not None:
+                    logits = self.classifier_text(text_feat)
+                else:
+                    logits = self.main_classifier(text_feat)
                 return logits
             elif modality == "image_only":
                 img_feat = self.image_encoder(images)
-                logits = self.classifier(img_feat)
+                if self.fusion_type == "late" and self.classifier_image is not None:
+                    logits = self.classifier_image(img_feat)
+                else:
+                    logits = self.main_classifier(img_feat)
                 return logits
             else:
                 text_feat = self.text_encoder(input_ids, lengths)
                 img_feat = self.image_encoder(images)
-                fused = self.fusion(text_feat, img_feat)
-                logits = self.classifier(fused)
+                if self.fusion_type == "cross_attn":
+                    fused = self.fusion(text_feat, img_feat)
+                    logits = self.main_classifier(fused)
+                elif self.fusion_type == "early":
+                    fused = torch.cat([text_feat, img_feat], dim=-1)
+                    logits = self.main_classifier(fused)
+                else:
+                    logits_text = self.classifier_text(text_feat)
+                    logits_image = self.classifier_image(img_feat)
+                    logits = (logits_text + logits_image) / 2.0
                 return logits
 
-    model = MultiModalModel(text_encoder, image_encoder, fusion, classifier)
+    model = MultiModalModel(text_encoder, image_encoder, fusion, main_classifier, classifier_text, classifier_image, fusion_type)
     model.load_state_dict(ckpt["model_state"])
     return model
 

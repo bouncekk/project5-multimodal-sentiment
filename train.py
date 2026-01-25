@@ -65,48 +65,78 @@ def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
 
     fusion = FusionModule(text_dim=text_encoder.output_dim, image_dim=image_encoder.output_dim, hidden_dim=args.fusion_hidden_dim)
 
-    # 根据实验模态动态确定分类器输入维度
-    if args.modality == "text_only":
-        classifier_input_dim = text_encoder.output_dim
-    elif args.modality == "image_only":
-        classifier_input_dim = image_encoder.output_dim
-    else:  # both
-        classifier_input_dim = fusion.output_dim
+    # 根据实验模态和融合方式动态确定分类器结构
+    if args.fusion_type == "late":
+        # late fusion: 为文本和图像各自构建一个分类头，最终在 logit 级别平均
+        classifier_text = Classifier(input_dim=text_encoder.output_dim, num_classes=3, hidden_dim=args.cls_hidden_dim)
+        classifier_image = Classifier(input_dim=image_encoder.output_dim, num_classes=3, hidden_dim=args.cls_hidden_dim)
+        main_classifier = None
+    else:
+        if args.modality == "text_only":
+            classifier_input_dim = text_encoder.output_dim
+        elif args.modality == "image_only":
+            classifier_input_dim = image_encoder.output_dim
+        else:  # both
+            if args.fusion_type == "early":
+                # early fusion: 直接拼接 text_feat 和 img_feat
+                classifier_input_dim = text_encoder.output_dim + image_encoder.output_dim
+            else:  # cross_attn
+                classifier_input_dim = fusion.output_dim
 
-    classifier = Classifier(input_dim=classifier_input_dim, num_classes=3, hidden_dim=args.cls_hidden_dim)
+        main_classifier = Classifier(input_dim=classifier_input_dim, num_classes=3, hidden_dim=args.cls_hidden_dim)
+        classifier_text = None
+        classifier_image = None
 
     class MultiModalModel(nn.Module):
-        def __init__(self, text_encoder, image_encoder, fusion, classifier):
+        def __init__(self, text_encoder, image_encoder, fusion, main_classifier, classifier_text, classifier_image, fusion_type: str):
             super().__init__()
             self.text_encoder = text_encoder
             self.image_encoder = image_encoder
             self.fusion = fusion
-            self.classifier = classifier
+            self.main_classifier = main_classifier
+            self.classifier_text = classifier_text
+            self.classifier_image = classifier_image
+            self.fusion_type = fusion_type
 
         def forward(self, input_ids, lengths, images, modality: str = "both"):
             if modality == "text_only":
                 text_feat = self.text_encoder(input_ids, lengths)
-                logits = self.classifier(text_feat)
+                if self.fusion_type == "late" and self.classifier_text is not None:
+                    logits = self.classifier_text(text_feat)
+                else:
+                    logits = self.main_classifier(text_feat)
                 return logits
             elif modality == "image_only":
                 img_feat = self.image_encoder(images)
-                logits = self.classifier(img_feat)
+                if self.fusion_type == "late" and self.classifier_image is not None:
+                    logits = self.classifier_image(img_feat)
+                else:
+                    logits = self.main_classifier(img_feat)
                 return logits
             else:
                 text_feat = self.text_encoder(input_ids, lengths)
                 img_feat = self.image_encoder(images)
-                fused = self.fusion(text_feat, img_feat)
-                logits = self.classifier(fused)
+                if self.fusion_type == "cross_attn":
+                    fused = self.fusion(text_feat, img_feat)
+                    logits = self.main_classifier(fused)
+                elif self.fusion_type == "early":
+                    fused = torch.cat([text_feat, img_feat], dim=-1)
+                    logits = self.main_classifier(fused)
+                else:  # late fusion
+                    logits_text = self.classifier_text(text_feat)
+                    logits_image = self.classifier_image(img_feat)
+                    logits = (logits_text + logits_image) / 2.0
                 return logits
 
-    model = MultiModalModel(text_encoder, image_encoder, fusion, classifier)
+    model = MultiModalModel(text_encoder, image_encoder, fusion, main_classifier, classifier_text, classifier_image, args.fusion_type)
     return model
 
 
 def get_data_loaders(args: argparse.Namespace, vocab: Vocab) -> Tuple[DataLoader, DataLoader]:
-    # ViT 期望输入经过 ImageNet 标准化
+    # ViT 期望输入经过标准化，这里在训练阶段加入轻量图像增强
     image_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),  # 随机裁剪并缩放到 224x224
+        transforms.RandomHorizontalFlip(p=0.5),               # 随机水平翻转
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
     ])
@@ -211,6 +241,9 @@ def parse_args():
     parser.add_argument("--val_ratio", type=float, default=0.1, help="ratio of validation set from training data")
 
     parser.add_argument("--modality", type=str, default="both", choices=["both", "text_only", "image_only"], help="for ablation experiments")
+    parser.add_argument("--fusion_type", type=str, default="cross_attn",
+                        choices=["cross_attn", "early", "late"],
+                        help="fusion strategy when using both modalities")
     parser.add_argument("--seed", type=int, default=42)
 
     args = parser.parse_args()
