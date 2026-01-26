@@ -308,11 +308,20 @@ def main():
 
     model = CLIPOpenAIWrapper(model_name=args.clip_model_name, cls_hidden_dim=args.cls_hidden_dim).to(device)
 
-    # 打印模型参数量（CLIP + 分类头）
-    num_params = sum(p.numel() for p in model.parameters())
-    num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"OpenAI CLIP backbone: {args.clip_model_name}")
-    print(f"Total parameters (CLIP + head): {num_params / 1e6:.3f} M, trainable: {num_trainable / 1e6:.3f} M")
+    # 打印模型参数量：总量 + 主干 CLIP + 分类头，便于与其他模型公平对比
+    total_params = sum(p.numel() for p in model.parameters())
+    total_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    clip_params = sum(p.numel() for p in model.clip.parameters())
+    clip_trainable = sum(p.numel() for p in model.clip.parameters() if p.requires_grad)
+
+    head_params = sum(p.numel() for p in model.classifier.parameters())
+    head_trainable = sum(p.numel() for p in model.classifier.parameters() if p.requires_grad)
+
+    print(f"OpenAI CLIP backbone (model_name): {args.clip_model_name}")
+    print(f"  - CLIP backbone params: {clip_params / 1e6:.3f} M, trainable: {clip_trainable / 1e6:.3f} M")
+    print(f"  - Classification head params: {head_params / 1e6:.3f} M, trainable: {head_trainable / 1e6:.3f} M")
+    print(f"  - Total parameters (CLIP + head): {total_params / 1e6:.3f} M, trainable: {total_trainable / 1e6:.3f} M")
 
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
