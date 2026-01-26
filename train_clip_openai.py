@@ -5,7 +5,7 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
-from torchvision import transforms
+
 from tqdm import tqdm
 from transformers import CLIPModel, CLIPProcessor
 from PIL import Image
@@ -176,18 +176,16 @@ def get_data_loaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader]:
     使用内部的 ClipOpenAIDataset，不再依赖 vocab.encode。
     """
 
-    # CLIPProcessor 自己会做 resize / center crop / normalize，这里只需基础变换
-    image_transform = transforms.Compose([
-        transforms.Resize((224, 224)),  # 保险起见先缩放到 224
-        transforms.ToTensor(),
-    ])
+
 
     train_data_path = os.path.join(args.data_dir, "train.txt")
     dataset = ClipOpenAIDataset(
         data_file=train_data_path,
         root_dir=args.data_dir,
         is_test=False,
-        image_transform=image_transform,
+        # 不再依赖 torchvision.transforms，直接返回 PIL.Image，由 CLIPProcessor 处理
+        image_transform=None,
+        
     )
 
     val_ratio = args.val_ratio
