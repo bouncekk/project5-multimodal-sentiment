@@ -165,13 +165,17 @@ class CLIPOpenAIWrapper(nn.Module):
         """输入原始文本列表和图像张量 (B, 3, H, W)。"""
         device = next(self.parameters()).device
 
-        # 将图像张量转换为 [0, 255] 范围的 PIL 期望形式由 processor 处理
-        # CLIPProcessor 可以直接吃 tensor + text list
+        # CLIPProcessor 可以直接吃 text list + PIL.Image 列表或张量。
+        # 为避免 "sequence length > max_position_embeddings" 的报错，这里显式截断文本到模型允许的最大长度。
+        max_txt_len = self.clip.config.text_config.max_position_embeddings
+
         inputs = self.processor(
             text=list(texts),
             images=images,
             return_tensors="pt",
-            padding=True,
+            padding="max_length",      # 对齐到统一长度
+            truncation=True,            # 超过 max_length 的部分直接截断
+            max_length=max_txt_len,
         ).to(device)
 
         outputs = self.clip(**inputs)
