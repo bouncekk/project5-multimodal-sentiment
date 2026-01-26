@@ -241,8 +241,8 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
     total = 0
 
     for batch in tqdm(loader, desc="Train"):
-        # 我们自定义的 Dataset 已经返回 images / labels / raw_texts
-        images = batch["images"].to(device)
+        # 我们自定义的 Dataset 已经返回 images(list[PIL]) / labels(tensor) / raw_texts
+        images = batch["images"]          # list of PIL.Image.Image, 由 CLIPProcessor 处理并移动到 device
         labels = batch["labels"].to(device)
         texts = batch["raw_texts"]
 
@@ -268,7 +268,7 @@ def evaluate(model, loader, criterion, device):
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="Val"):
-            images = batch["images"].to(device)
+            images = batch["images"]          # list of PIL.Image.Image
             labels = batch["labels"].to(device)
             texts = batch["raw_texts"]
 
