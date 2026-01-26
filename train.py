@@ -13,6 +13,7 @@ from models.text_encoder import TextEncoder
 from models.image_encoder import ImageEncoder
 from models.fusion import FusionModule
 from models.classifier import Classifier
+from models.clip_encoder import CLIPTextEncoder, CLIPImageEncoder
 
 
 LABEL2ID = {"negative": 0, "neutral": 1, "positive": 2}
@@ -59,9 +60,32 @@ def build_vocab_from_file(train_file: str, max_samples: int = 100000) -> Vocab:
 
 
 def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
-    text_encoder = TextEncoder(vocab_size=vocab.size, embed_dim=args.text_embed_dim, hidden_dim=args.text_hidden_dim)
-    # 使用 ViT 版本的图像编码器
-    image_encoder = ImageEncoder(model_name="google/vit-base-patch16-224-in21k", pretrained=True, train_backbone=True)
+    """根据 model_type 和 fusion_type 构建模型结构。
+
+    - model_type = "bert_vit": 使用 TextEncoder + ImageEncoder (ViT)
+    - model_type = "clip":     使用 CLIPTextEncoder + CLIPImageEncoder，并支持 clip_match 融合
+    """
+
+    # 统一的对齐维度，用于 BERT/ViT 或 CLIP 投影后对齐
+    proj_dim = args.fusion_hidden_dim
+
+    if args.model_type == "clip":
+        # CLIP 风格：复用现有编码器，再投影到统一维度
+        text_encoder = CLIPTextEncoder(
+            vocab_size=vocab.size,
+            text_embed_dim=args.text_embed_dim,
+            text_hidden_dim=args.text_hidden_dim,
+            proj_dim=proj_dim,
+        )
+        image_encoder = CLIPImageEncoder(
+            proj_dim=proj_dim,
+            pretrained=True,
+            train_backbone=True,
+        )
+    else:
+        # 默认 BERT+ViT
+        text_encoder = TextEncoder(vocab_size=vocab.size, embed_dim=args.text_embed_dim, hidden_dim=args.text_hidden_dim)
+        image_encoder = ImageEncoder(model_name="google/vit-base-patch16-224-in21k", pretrained=True, train_backbone=True)
 
     fusion = FusionModule(text_dim=text_encoder.output_dim, image_dim=image_encoder.output_dim, hidden_dim=args.fusion_hidden_dim)
 
@@ -71,6 +95,14 @@ def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
         classifier_text = Classifier(input_dim=text_encoder.output_dim, num_classes=3, hidden_dim=args.cls_hidden_dim)
         classifier_image = Classifier(input_dim=image_encoder.output_dim, num_classes=3, hidden_dim=args.cls_hidden_dim)
         main_classifier = None
+    elif args.fusion_type == "clip_match":
+        # CLIP 匹配特征：使用余弦相似度等构造匹配特征，再送入统一分类头
+        # 匹配特征维度：4 * d + 1 （t_hat, v_hat, |t_hat-v_hat|, t_hat*v_hat, cos）
+        d = text_encoder.output_dim
+        classifier_input_dim = 4 * d + 1
+        main_classifier = Classifier(input_dim=classifier_input_dim, num_classes=3, hidden_dim=args.cls_hidden_dim)
+        classifier_text = None
+        classifier_image = None
     else:
         if args.modality == "text_only":
             classifier_input_dim = text_encoder.output_dim
@@ -88,7 +120,7 @@ def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
         classifier_image = None
 
     class MultiModalModel(nn.Module):
-        def __init__(self, text_encoder, image_encoder, fusion, main_classifier, classifier_text, classifier_image, fusion_type: str):
+        def __init__(self, text_encoder, image_encoder, fusion, main_classifier, classifier_text, classifier_image, fusion_type: str, model_type: str):
             super().__init__()
             self.text_encoder = text_encoder
             self.image_encoder = image_encoder
@@ -97,6 +129,7 @@ def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
             self.classifier_text = classifier_text
             self.classifier_image = classifier_image
             self.fusion_type = fusion_type
+            self.model_type = model_type
 
         def forward(self, input_ids, lengths, images, modality: str = "both"):
             if modality == "text_only":
@@ -122,13 +155,22 @@ def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
                 elif self.fusion_type == "early":
                     fused = torch.cat([text_feat, img_feat], dim=-1)
                     logits = self.main_classifier(fused)
+                elif self.fusion_type == "clip_match":
+                    # CLIP 匹配特征：使用归一化后的特征构造匹配向量
+                    t_hat = torch.nn.functional.normalize(text_feat, dim=-1)
+                    v_hat = torch.nn.functional.normalize(img_feat, dim=-1)
+                    cos = (t_hat * v_hat).sum(dim=-1, keepdim=True)
+                    diff = torch.abs(t_hat - v_hat)
+                    prod = t_hat * v_hat
+                    fused = torch.cat([t_hat, v_hat, diff, prod, cos], dim=-1)
+                    logits = self.main_classifier(fused)
                 else:  # late fusion
                     logits_text = self.classifier_text(text_feat)
                     logits_image = self.classifier_image(img_feat)
                     logits = (logits_text + logits_image) / 2.0
                 return logits
 
-    model = MultiModalModel(text_encoder, image_encoder, fusion, main_classifier, classifier_text, classifier_image, args.fusion_type)
+    model = MultiModalModel(text_encoder, image_encoder, fusion, main_classifier, classifier_text, classifier_image, args.fusion_type, args.model_type)
     return model
 
 
@@ -242,8 +284,11 @@ def parse_args():
 
     parser.add_argument("--modality", type=str, default="both", choices=["both", "text_only", "image_only"], help="for ablation experiments")
     parser.add_argument("--fusion_type", type=str, default="cross_attn",
-                        choices=["cross_attn", "early", "late"],
+                        choices=["cross_attn", "early", "late", "clip_match"],
                         help="fusion strategy when using both modalities")
+    parser.add_argument("--model_type", type=str, default="bert_vit",
+                        choices=["bert_vit", "clip"],
+                        help="backbone choice: BERT+ViT or CLIP-style encoders")
     parser.add_argument("--seed", type=int, default=42)
 
     args = parser.parse_args()
@@ -273,6 +318,12 @@ def main():
 
     train_loader, val_loader = get_data_loaders(args, vocab)
     model = build_model(vocab, args).to(device)
+
+    # 打印模型参数量，便于不同模型/融合方式的公平对比
+    num_params = sum(p.numel() for p in model.parameters())
+    num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model type: {args.model_type}, fusion_type: {args.fusion_type}, modality: {args.modality}")
+    print(f"Total parameters: {num_params / 1e6:.3f} M, trainable: {num_trainable / 1e6:.3f} M")
 
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)

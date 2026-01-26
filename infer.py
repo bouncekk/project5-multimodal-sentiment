@@ -11,6 +11,7 @@ from models.text_encoder import TextEncoder
 from models.image_encoder import ImageEncoder
 from models.fusion import FusionModule
 from models.classifier import Classifier
+from models.clip_encoder import CLIPTextEncoder, CLIPImageEncoder
 
 
 LABEL2ID = {"negative": 0, "neutral": 1, "positive": 2}
@@ -34,9 +35,25 @@ def build_model_from_ckpt(ckpt_path: str, vocab: Vocab, modality: str):
     ckpt = torch.load(ckpt_path, map_location="cpu")
     args_dict = ckpt["args"]
 
-    text_encoder = TextEncoder(vocab_size=vocab.size, embed_dim=args_dict["text_embed_dim"], hidden_dim=args_dict["text_hidden_dim"])
-    # 使用 ViT 版本的图像编码器，保持与训练时一致
-    image_encoder = ImageEncoder(model_name="google/vit-base-patch16-224-in21k", pretrained=True, train_backbone=True)
+    model_type = args_dict.get("model_type", "bert_vit")
+
+    if model_type == "clip":
+        text_encoder = CLIPTextEncoder(
+            vocab_size=vocab.size,
+            text_embed_dim=args_dict["text_embed_dim"],
+            text_hidden_dim=args_dict["text_hidden_dim"],
+            proj_dim=args_dict["fusion_hidden_dim"],
+        )
+        image_encoder = CLIPImageEncoder(
+            proj_dim=args_dict["fusion_hidden_dim"],
+            pretrained=True,
+            train_backbone=True,
+        )
+    else:
+        text_encoder = TextEncoder(vocab_size=vocab.size, embed_dim=args_dict["text_embed_dim"], hidden_dim=args_dict["text_hidden_dim"])
+        # 使用 ViT 版本的图像编码器，保持与训练时一致
+        image_encoder = ImageEncoder(model_name="google/vit-base-patch16-224-in21k", pretrained=True, train_backbone=True)
+
     fusion = FusionModule(text_dim=text_encoder.output_dim, image_dim=image_encoder.output_dim, hidden_dim=args_dict["fusion_hidden_dim"])
 
     fusion_type = args_dict.get("fusion_type", "cross_attn")
@@ -45,6 +62,12 @@ def build_model_from_ckpt(ckpt_path: str, vocab: Vocab, modality: str):
         classifier_text = Classifier(input_dim=text_encoder.output_dim, num_classes=3, hidden_dim=args_dict["cls_hidden_dim"])
         classifier_image = Classifier(input_dim=image_encoder.output_dim, num_classes=3, hidden_dim=args_dict["cls_hidden_dim"])
         main_classifier = None
+    elif fusion_type == "clip_match":
+        d = text_encoder.output_dim
+        classifier_input_dim = 4 * d + 1
+        main_classifier = Classifier(input_dim=classifier_input_dim, num_classes=3, hidden_dim=args_dict["cls_hidden_dim"])
+        classifier_text = None
+        classifier_image = None
     else:
         if modality == "text_only":
             classifier_input_dim = text_encoder.output_dim
@@ -61,7 +84,7 @@ def build_model_from_ckpt(ckpt_path: str, vocab: Vocab, modality: str):
         classifier_image = None
 
     class MultiModalModel(torch.nn.Module):
-        def __init__(self, text_encoder, image_encoder, fusion, main_classifier, classifier_text, classifier_image, fusion_type: str):
+        def __init__(self, text_encoder, image_encoder, fusion, main_classifier, classifier_text, classifier_image, fusion_type: str, model_type: str):
             super().__init__()
             self.text_encoder = text_encoder
             self.image_encoder = image_encoder
@@ -70,6 +93,7 @@ def build_model_from_ckpt(ckpt_path: str, vocab: Vocab, modality: str):
             self.classifier_text = classifier_text
             self.classifier_image = classifier_image
             self.fusion_type = fusion_type
+            self.model_type = model_type
 
         def forward(self, input_ids, lengths, images, modality: str = "both"):
             if modality == "text_only":
@@ -95,13 +119,21 @@ def build_model_from_ckpt(ckpt_path: str, vocab: Vocab, modality: str):
                 elif self.fusion_type == "early":
                     fused = torch.cat([text_feat, img_feat], dim=-1)
                     logits = self.main_classifier(fused)
+                elif self.fusion_type == "clip_match":
+                    t_hat = torch.nn.functional.normalize(text_feat, dim=-1)
+                    v_hat = torch.nn.functional.normalize(img_feat, dim=-1)
+                    cos = (t_hat * v_hat).sum(dim=-1, keepdim=True)
+                    diff = torch.abs(t_hat - v_hat)
+                    prod = t_hat * v_hat
+                    fused = torch.cat([t_hat, v_hat, diff, prod, cos], dim=-1)
+                    logits = self.main_classifier(fused)
                 else:
                     logits_text = self.classifier_text(text_feat)
                     logits_image = self.classifier_image(img_feat)
                     logits = (logits_text + logits_image) / 2.0
                 return logits
 
-    model = MultiModalModel(text_encoder, image_encoder, fusion, main_classifier, classifier_text, classifier_image, fusion_type)
+    model = MultiModalModel(text_encoder, image_encoder, fusion, main_classifier, classifier_text, classifier_image, fusion_type, model_type)
     model.load_state_dict(ckpt["model_state"])
     return model
 
