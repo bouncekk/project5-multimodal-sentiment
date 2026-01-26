@@ -5,7 +5,7 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
-
+from torchvision import transforms
 from tqdm import tqdm
 from transformers import CLIPModel, CLIPProcessor
 from PIL import Image
@@ -99,6 +99,25 @@ class ClipOpenAIDataset(Dataset):
         }
 
 
+def clip_collate_fn(batch):
+    """自定义 collate_fn：
+
+    - 保持 images 为 PIL.Image 的列表，直接交给 CLIPProcessor 处理；
+    - 将 labels 堆叠为一个 LongTensor；
+    - 将 raw_texts 组成字符串列表。
+    """
+
+    images = [item["images"] for item in batch]
+    labels = torch.stack([item["labels"] for item in batch], dim=0)
+    texts = [item["raw_texts"] for item in batch]
+
+    return {
+        "images": images,
+        "labels": labels,
+        "raw_texts": texts,
+    }
+
+
 class CLIPOpenAIWrapper(nn.Module):
     """使用 OpenAI 预训练 CLIP 模型的封装，用于情感三分类。
 
@@ -176,16 +195,18 @@ def get_data_loaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader]:
     使用内部的 ClipOpenAIDataset，不再依赖 vocab.encode。
     """
 
-
+    # CLIPProcessor 自己会做 resize / center crop / normalize，这里只需基础变换
+    image_transform = transforms.Compose([
+        transforms.Resize((224, 224)),  # 保险起见先缩放到 224
+        transforms.ToTensor(),
+    ])
 
     train_data_path = os.path.join(args.data_dir, "train.txt")
     dataset = ClipOpenAIDataset(
         data_file=train_data_path,
         root_dir=args.data_dir,
         is_test=False,
-        # 不再依赖 torchvision.transforms，直接返回 PIL.Image，由 CLIPProcessor 处理
-        image_transform=None,
-        
+        image_transform=image_transform,
     )
 
     val_ratio = args.val_ratio
@@ -194,20 +215,20 @@ def get_data_loaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader]:
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
     # 默认的 collate_fn 即可：
-    #  - 图像张量会被堆叠成 (B, 3, H, W)
-    #  - 标签堆叠成长整型张量
-    #  - 原始文本组成长度为 B 的字符串列表
+    #  - 这里改为使用 clip_collate_fn，保持 images 为 PIL.Image 列表，labels 为张量
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
+        collate_fn=clip_collate_fn,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
+        collate_fn=clip_collate_fn,
     )
 
     return train_loader, val_loader
