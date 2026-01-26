@@ -110,11 +110,13 @@ def clip_collate_fn(batch):
     images = [item["images"] for item in batch]
     labels = torch.stack([item["labels"] for item in batch], dim=0)
     texts = [item["raw_texts"] for item in batch]
+    image_paths = [item["image_paths"] for item in batch]
 
     return {
         "images": images,
         "labels": labels,
         "raw_texts": texts,
+        "image_paths": image_paths,
     }
 
 
@@ -238,6 +240,33 @@ def get_data_loaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader]:
     return train_loader, val_loader
 
 
+def get_test_loader(args: argparse.Namespace) -> DataLoader:
+    """构造用于无标签测试集 (test_without_label.txt) 的 DataLoader。"""
+
+    image_transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+    ])
+
+    test_data_path = os.path.join(args.data_dir, "test_without_label.txt")
+    dataset = ClipOpenAIDataset(
+        data_file=test_data_path,
+        root_dir=args.data_dir,
+        is_test=True,
+        image_transform=image_transform,
+    )
+
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=clip_collate_fn,
+    )
+
+    return loader
+
+
 def train_one_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
@@ -305,6 +334,11 @@ def parse_args():
     parser.add_argument("--clip_model_name", type=str, default="openai/clip-vit-base-patch32")
     parser.add_argument("--cls_hidden_dim", type=int, default=512)
 
+    # 推理相关参数（仅在 --do_infer 时使用）
+    parser.add_argument("--do_infer", action="store_true", help="Run inference on test_without_label.txt instead of training")
+    parser.add_argument("--ckpt_path", type=str, default=None, help="Path to a saved CLIPOpenAIWrapper checkpoint for inference")
+    parser.add_argument("--output_path", type=str, default="submission_clip_openai.txt", help="Output file for test predictions (guid,label)")
+
     args = parser.parse_args()
     return args
 
@@ -327,6 +361,41 @@ def main():
 
     os.makedirs(args.save_dir, exist_ok=True)
 
+    # 推理模式：只加载 checkpoint，在 test_without_label.txt 上生成预测文件
+    if args.do_infer:
+        if args.ckpt_path is None or not os.path.exists(args.ckpt_path):
+            raise ValueError(f"--do_infer 需要提供有效的 --ckpt_path，当前: {args.ckpt_path}")
+
+        print(f"[Infer] Loading checkpoint from {args.ckpt_path}")
+        ckpt = torch.load(args.ckpt_path, map_location=device)
+
+        model = CLIPOpenAIWrapper(model_name=args.clip_model_name, cls_hidden_dim=args.cls_hidden_dim).to(device)
+        model.load_state_dict(ckpt["model_state"], strict=True)
+        model.eval()
+
+        test_loader = get_test_loader(args)
+
+        os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
+        with torch.no_grad(), open(args.output_path, "w", encoding="utf-8") as fw:
+            fw.write("guid,label\n")
+            for batch in tqdm(test_loader, desc="Infer"):
+                images = batch["images"]
+                texts = batch["raw_texts"]
+                image_paths = batch["image_paths"]
+
+                logits = model(texts, images)
+                preds = logits.argmax(dim=-1).cpu().tolist()
+
+                for guid_path, pred_id in zip(image_paths, preds):
+                    # guid 形如 "data/xxx.jpg"，取出中间的文件名部分去掉扩展名
+                    guid = os.path.splitext(os.path.basename(guid_path))[0]
+                    label_str = ID2LABEL.get(pred_id, "neutral")
+                    fw.write(f"{guid},{label_str}\n")
+
+        print(f"[Infer] Saved predictions to {args.output_path}")
+        return
+
+    # 训练模式（默认）：与原先逻辑保持不变
     train_loader, val_loader = get_data_loaders(args)
 
     model = CLIPOpenAIWrapper(model_name=args.clip_model_name, cls_hidden_dim=args.cls_hidden_dim).to(device)
