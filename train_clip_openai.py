@@ -397,13 +397,13 @@ def evaluate_ablation(model, loader, device, mode: str):
             texts = batch["raw_texts"]
 
             if mode == "text_only":
-                # 文本单模态：把图像变成纯黑图，尽量抹掉视觉信息
+                # 文本单模态：把图像变成固定尺寸的纯黑图，尽量抹掉视觉信息
                 from PIL import Image as _Image
 
                 dummy_images = []
-                for img in images:
-                    # 保持尺寸不变，内容全黑
-                    dummy_images.append(_Image.new("RGB", img.size, (0, 0, 0)))
+                for _ in images:
+                    # 这里不依赖原始 img.size（可能是 tensor），直接使用与预处理一致的 224x224 尺寸
+                    dummy_images.append(_Image.new("RGB", (224, 224), (0, 0, 0)))
                 images = dummy_images
 
             elif mode == "image_only":
@@ -527,9 +527,9 @@ def main():
         # full 多模态
         acc_full = evaluate_ablation(model, val_loader, device, mode="full")
         # 仅文本
-        acc_text = evaluate_ablation(model, val_loader, device, mode="image_only")
+        acc_text = evaluate_ablation(model, val_loader, device, mode="text_only")
         # 仅图像
-        acc_image = evaluate_ablation(model, val_loader, device, mode="text_only")
+        acc_image = evaluate_ablation(model, val_loader, device, mode="image_only")
 
         print("[AblationEval] Validation accuracy:")
         print(f"  - full (text+image):  {acc_full * 100:.2f}%")
