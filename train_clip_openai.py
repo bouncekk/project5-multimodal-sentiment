@@ -193,6 +193,21 @@ class CLIPOpenAIWrapper(nn.Module):
             nn.Linear(cls_hidden_dim, 3),
         )
 
+        # 纯文本 / 纯图像 模型的分类头（重新训练时只依赖单一模态特征）
+        self.text_only_classifier = nn.Sequential(
+            nn.Linear(embed_dim, cls_hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(cls_hidden_dim, 3),
+        )
+
+        self.image_only_classifier = nn.Sequential(
+            nn.Linear(embed_dim, cls_hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(cls_hidden_dim, 3),
+        )
+
     def forward(self, texts, images):
         """输入原始文本列表和图像张量 (B, 3, H, W)。"""
         device = next(self.parameters()).device
@@ -242,6 +257,14 @@ class CLIPOpenAIWrapper(nn.Module):
             fused = self.attn_encoder(seq)
             fused_cls = fused[:, 0]
             logits = self.attn_classifier(fused_cls)
+
+        elif self.fusion_type == "text_only":
+            # 纯文本模型：只使用文本特征进行分类
+            logits = self.text_only_classifier(t_hat)
+
+        elif self.fusion_type == "image_only":
+            # 纯图像模型：只使用图像特征进行分类
+            logits = self.image_only_classifier(v_hat)
 
         else:
             # 未知类型时退回 clip_match，避免崩溃
@@ -437,10 +460,10 @@ def parse_args():
     parser.add_argument("--clip_model_name", type=str, default="openai/clip-vit-base-patch32")
     parser.add_argument("--cls_hidden_dim", type=int, default=512)
 
-    # 融合方式：clip_match（默认）、early、late、attn
+    # 融合方式：clip_match（默认）、early、late、attn 以及纯文本 / 纯图像
     parser.add_argument("--fusion_type", type=str, default="clip_match",
-                        choices=["clip_match", "early", "late", "attn"],
-                        help="Fusion strategy on top of OpenAI CLIP embeddings")
+                        choices=["clip_match", "early", "late", "attn", "text_only", "image_only"],
+                        help="Fusion strategy on top of OpenAI CLIP embeddings (including text_only / image_only variants)")
 
     # 推理相关参数（仅在 --do_infer 时使用）
     parser.add_argument("--do_infer", action="store_true", help="Run inference on test_without_label.txt instead of training")
