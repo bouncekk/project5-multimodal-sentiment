@@ -375,6 +375,50 @@ def evaluate(model, loader, criterion, device):
     return total_loss / total, correct / total
 
 
+def evaluate_ablation(model, loader, device, mode: str):
+    """在验证集上做消融实验：
+
+    mode:
+        - "full": 正常多模态
+        - "text_only": 文本单模态（图像信息被抹掉）
+        - "image_only": 图像单模态（文本信息被抹掉）
+    """
+
+    assert mode in {"full", "text_only", "image_only"}
+
+    model.eval()
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for batch in tqdm(loader, desc=f"Val[{mode}]"):
+            images = batch["images"]          # list of PIL.Image.Image
+            labels = batch["labels"].to(device)
+            texts = batch["raw_texts"]
+
+            if mode == "text_only":
+                # 文本单模态：把图像变成纯黑图，尽量抹掉视觉信息
+                from PIL import Image as _Image
+
+                dummy_images = []
+                for img in images:
+                    # 保持尺寸不变，内容全黑
+                    dummy_images.append(_Image.new("RGB", img.size, (0, 0, 0)))
+                images = dummy_images
+
+            elif mode == "image_only":
+                # 图像单模态：把文本替换为无信息的空字符串
+                texts = ["" for _ in texts]
+
+            logits = model(texts, images)
+            preds = logits.argmax(dim=-1)
+
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+
+    return correct / total
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Training with OpenAI CLIP for multimodal sentiment classification")
     parser.add_argument("--data_dir", type=str, default="data", help="Directory containing train.txt and images")
@@ -400,7 +444,9 @@ def parse_args():
 
     # 推理相关参数（仅在 --do_infer 时使用）
     parser.add_argument("--do_infer", action="store_true", help="Run inference on test_without_label.txt instead of training")
-    parser.add_argument("--ckpt_path", type=str, default=None, help="Path to a saved CLIPOpenAIWrapper checkpoint for inference")
+    parser.add_argument("--ckpt_path", type=str, default=None, help="Path to a saved CLIPOpenAIWrapper checkpoint for inference/ablation eval")
+    # 消融验证：在验证集上分别进行 full / text-only / image-only 评估
+    parser.add_argument("--do_ablation_eval", action="store_true", help="Run ablation evaluation (full/text-only/image-only) on validation set using a trained checkpoint")
     parser.add_argument("--output_path", type=str, default="submission_clip_openai.txt", help="Output file for test predictions (guid,label)")
 
     args = parser.parse_args()
@@ -459,6 +505,37 @@ def main():
                     fw.write(f"{guid},{label_str}\n")
 
         print(f"[Infer] Saved predictions to {args.output_path}")
+        return
+
+    # 消融验证模式：使用已训练好的 checkpoint，在验证集上做 full/text-only/image-only 三种评估
+    if args.do_ablation_eval:
+        if args.ckpt_path is None or not os.path.exists(args.ckpt_path):
+            raise ValueError(f"--do_ablation_eval 需要提供有效的 --ckpt_path，当前: {args.ckpt_path}")
+
+        print(f"[AblationEval] Loading checkpoint from {args.ckpt_path}")
+        ckpt = torch.load(args.ckpt_path, map_location=device)
+
+        _, val_loader = get_data_loaders(args)
+
+        model = CLIPOpenAIWrapper(
+            model_name=args.clip_model_name,
+            cls_hidden_dim=args.cls_hidden_dim,
+            fusion_type=args.fusion_type,
+        ).to(device)
+        model.load_state_dict(ckpt["model_state"], strict=True)
+
+        # full 多模态
+        acc_full = evaluate_ablation(model, val_loader, device, mode="full")
+        # 仅文本
+        acc_text = evaluate_ablation(model, val_loader, device, mode="image_only")
+        # 仅图像
+        acc_image = evaluate_ablation(model, val_loader, device, mode="text_only")
+
+        print("[AblationEval] Validation accuracy:")
+        print(f"  - full (text+image):  {acc_full * 100:.2f}%")
+        print(f"  - text only:          {acc_text * 100:.2f}%")
+        print(f"  - image only:         {acc_image * 100:.2f}%")
+
         return
 
     # 训练模式（默认）：与原先逻辑保持不变
