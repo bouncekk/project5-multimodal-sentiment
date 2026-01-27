@@ -375,11 +375,17 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
     return total_loss / total, correct / total
 
 
-def evaluate(model, loader, criterion, device):
+def evaluate(model, loader, criterion, device, log_badcase_path: str | None = None):
     model.eval()
     total_loss = 0.0
     correct = 0
     total = 0
+
+    fw = None
+    if log_badcase_path is not None:
+        os.makedirs(os.path.dirname(log_badcase_path) or ".", exist_ok=True)
+        fw = open(log_badcase_path, "w", encoding="utf-8")
+        fw.write("guid,true_label,pred_label\n")
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="Val"):
@@ -394,6 +400,19 @@ def evaluate(model, loader, criterion, device):
             preds = logits.argmax(dim=-1)
             correct += (preds == labels).sum().item()
             total += labels.size(0)
+
+            if fw is not None:
+                image_paths = batch.get("image_paths", None)
+                if image_paths is not None:
+                    preds_cpu = preds.cpu().tolist()
+                    labels_cpu = labels.cpu().tolist()
+                    for guid_path, y_true, y_pred in zip(image_paths, labels_cpu, preds_cpu):
+                        guid = os.path.splitext(os.path.basename(guid_path))[0]
+                        if y_true != y_pred:
+                            fw.write(f"{guid},{ID2LABEL[int(y_true)]},{ID2LABEL[int(y_pred)]}\n")
+
+    if fw is not None:
+        fw.close()
 
     return total_loss / total, correct / total
 
@@ -593,7 +612,8 @@ def main():
     for epoch in range(1, args.epochs + 1):
         print(f"Epoch {epoch}/{args.epochs}")
         train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+        badcase_csv = os.path.join(args.save_dir, f"val_bad_cases_epoch{epoch}.csv")
+        val_loss, val_acc = evaluate(model, val_loader, criterion, device, log_badcase_path=badcase_csv)
 
         print(f"Train loss: {train_loss:.4f}, acc: {train_acc:.4f}")
         print(f"Val   loss: {val_loss:.4f}, acc: {val_acc:.4f}")
