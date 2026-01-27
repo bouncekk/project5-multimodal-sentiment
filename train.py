@@ -83,8 +83,13 @@ def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
             train_backbone=True,
         )
     else:
-        # 默认 BERT+ViT
-        text_encoder = TextEncoder(vocab_size=vocab.size, embed_dim=args.text_embed_dim, hidden_dim=args.text_hidden_dim)
+        # 默认 BERT+ViT：通过 text_hidden_dim 和 text_num_layers 控制文本编码器容量
+        text_encoder = TextEncoder(
+            vocab_size=vocab.size,
+            embed_dim=args.text_embed_dim,
+            hidden_dim=args.text_hidden_dim,
+            num_layers=args.text_num_layers,
+        )
         image_encoder = ImageEncoder(model_name="google/vit-base-patch16-224-in21k", pretrained=True, train_backbone=True)
 
     fusion = FusionModule(text_dim=text_encoder.output_dim, image_dim=image_encoder.output_dim, hidden_dim=args.fusion_hidden_dim)
@@ -271,9 +276,12 @@ def parse_args():
 
     parser.add_argument("--max_text_len", type=int, default=64)
     parser.add_argument("--text_embed_dim", type=int, default=128)
-    parser.add_argument("--text_hidden_dim", type=int, default=256)
-    parser.add_argument("--fusion_hidden_dim", type=int, default=256)
-    parser.add_argument("--cls_hidden_dim", type=int, default=128)
+    # 提高文本编码器容量：更大的 hidden_dim 和更多层数
+    parser.add_argument("--text_hidden_dim", type=int, default=512)
+    parser.add_argument("--text_num_layers", type=int, default=8)
+    # 增大融合和分类头的隐藏维度，使整体参数量提升到接近 1.5e8
+    parser.add_argument("--fusion_hidden_dim", type=int, default=512)
+    parser.add_argument("--cls_hidden_dim", type=int, default=256)
 
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_workers", type=int, default=2)

@@ -129,9 +129,10 @@ class CLIPOpenAIWrapper(nn.Module):
     - 上接一个 MLP 分类头输出 3 类情感
     """
 
-    def __init__(self, model_name: str = "openai/clip-vit-base-patch32", cls_hidden_dim: int = 512):
+    def __init__(self, model_name: str = "openai/clip-vit-base-patch32", cls_hidden_dim: int = 512, fusion_type: str = "clip_match"):
         super().__init__()
         self.model_name = model_name
+        self.fusion_type = fusion_type
 
         # 优先尝试离线加载（只用本地缓存，不访问网络），避免在网络被拦截时长时间重试
         try:
@@ -156,8 +157,37 @@ class CLIPOpenAIWrapper(nn.Module):
         # 匹配特征维度：t_hat, v_hat, |t-v|, t*v, cos
         match_dim = 4 * embed_dim + 1
 
-        self.classifier = nn.Sequential(
+        # clip_match 融合头（保持与原实现一致）
+        self.clip_classifier = nn.Sequential(
             nn.Linear(match_dim, cls_hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(cls_hidden_dim, 3),
+        )
+
+        # early fusion：简单拼接 t_hat, v_hat 后做 MLP
+        self.early_classifier = nn.Sequential(
+            nn.Linear(2 * embed_dim, cls_hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(cls_hidden_dim, 3),
+        )
+
+        # late fusion：分别对文本/图像做分类，再对 logits 取平均
+        self.text_classifier = nn.Linear(embed_dim, 3)
+        self.image_classifier = nn.Linear(embed_dim, 3)
+
+        # attention fusion：将 [t_hat, v_hat] 组成长度 2 的序列，过 TransformerEncoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=8,
+            dim_feedforward=4 * embed_dim,
+            dropout=0.1,
+            batch_first=True,
+        )
+        self.attn_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
+        self.attn_classifier = nn.Sequential(
+            nn.Linear(embed_dim, cls_hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(0.1),
             nn.Linear(cls_hidden_dim, 3),
@@ -186,12 +216,41 @@ class CLIPOpenAIWrapper(nn.Module):
 
         t_hat = nn.functional.normalize(text_embeds, dim=-1)
         v_hat = nn.functional.normalize(image_embeds, dim=-1)
-        cos = (t_hat * v_hat).sum(dim=-1, keepdim=True)
-        diff = torch.abs(t_hat - v_hat)
-        prod = t_hat * v_hat
-        match_feat = torch.cat([t_hat, v_hat, diff, prod, cos], dim=-1)
 
-        logits = self.classifier(match_feat)
+        if self.fusion_type == "clip_match":
+            # 与原实现相同的 clip_match 特征
+            cos = (t_hat * v_hat).sum(dim=-1, keepdim=True)
+            diff = torch.abs(t_hat - v_hat)
+            prod = t_hat * v_hat
+            match_feat = torch.cat([t_hat, v_hat, diff, prod, cos], dim=-1)
+            logits = self.clip_classifier(match_feat)
+
+        elif self.fusion_type == "early":
+            # early fusion：直接拼接文本/图像特征
+            feat = torch.cat([t_hat, v_hat], dim=-1)
+            logits = self.early_classifier(feat)
+
+        elif self.fusion_type == "late":
+            # late fusion：分别做分类，再对 logits 取平均
+            logits_t = self.text_classifier(t_hat)
+            logits_v = self.image_classifier(v_hat)
+            logits = (logits_t + logits_v) / 2.0
+
+        elif self.fusion_type == "attn":
+            # attention fusion：长度为 2 的序列，经 TransformerEncoder 融合
+            seq = torch.stack([t_hat, v_hat], dim=1)  # (B, 2, D)
+            fused = self.attn_encoder(seq)
+            fused_cls = fused[:, 0]
+            logits = self.attn_classifier(fused_cls)
+
+        else:
+            # 未知类型时退回 clip_match，避免崩溃
+            cos = (t_hat * v_hat).sum(dim=-1, keepdim=True)
+            diff = torch.abs(t_hat - v_hat)
+            prod = t_hat * v_hat
+            match_feat = torch.cat([t_hat, v_hat, diff, prod, cos], dim=-1)
+            logits = self.clip_classifier(match_feat)
+
         return logits
 
 
@@ -334,6 +393,11 @@ def parse_args():
     parser.add_argument("--clip_model_name", type=str, default="openai/clip-vit-base-patch32")
     parser.add_argument("--cls_hidden_dim", type=int, default=512)
 
+    # 融合方式：clip_match（默认）、early、late、attn
+    parser.add_argument("--fusion_type", type=str, default="clip_match",
+                        choices=["clip_match", "early", "late", "attn"],
+                        help="Fusion strategy on top of OpenAI CLIP embeddings")
+
     # 推理相关参数（仅在 --do_infer 时使用）
     parser.add_argument("--do_infer", action="store_true", help="Run inference on test_without_label.txt instead of training")
     parser.add_argument("--ckpt_path", type=str, default=None, help="Path to a saved CLIPOpenAIWrapper checkpoint for inference")
@@ -369,7 +433,9 @@ def main():
         print(f"[Infer] Loading checkpoint from {args.ckpt_path}")
         ckpt = torch.load(args.ckpt_path, map_location=device)
 
-        model = CLIPOpenAIWrapper(model_name=args.clip_model_name, cls_hidden_dim=args.cls_hidden_dim).to(device)
+        model = CLIPOpenAIWrapper(model_name=args.clip_model_name,
+                                  cls_hidden_dim=args.cls_hidden_dim,
+                                  fusion_type=args.fusion_type).to(device)
         model.load_state_dict(ckpt["model_state"], strict=True)
         model.eval()
 
@@ -398,7 +464,11 @@ def main():
     # 训练模式（默认）：与原先逻辑保持不变
     train_loader, val_loader = get_data_loaders(args)
 
-    model = CLIPOpenAIWrapper(model_name=args.clip_model_name, cls_hidden_dim=args.cls_hidden_dim).to(device)
+    model = CLIPOpenAIWrapper(
+        model_name=args.clip_model_name,
+        cls_hidden_dim=args.cls_hidden_dim,
+        fusion_type=args.fusion_type,
+    ).to(device)
 
     # 打印模型参数量：总量 + 主干 CLIP + 分类头，便于与其他模型公平对比
     total_params = sum(p.numel() for p in model.parameters())
@@ -407,13 +477,14 @@ def main():
     clip_params = sum(p.numel() for p in model.clip.parameters())
     clip_trainable = sum(p.numel() for p in model.clip.parameters() if p.requires_grad)
 
-    head_params = sum(p.numel() for p in model.classifier.parameters())
-    head_trainable = sum(p.numel() for p in model.classifier.parameters() if p.requires_grad)
+    # 这里只粗略统计 clip_match 头的参数量，其他 head 相比于 backbone 只增加少量参数
+    head_params = sum(p.numel() for p in model.clip_classifier.parameters())
+    head_trainable = sum(p.numel() for p in model.clip_classifier.parameters() if p.requires_grad)
 
-    print(f"OpenAI CLIP backbone (model_name): {args.clip_model_name}")
+    print(f"OpenAI CLIP backbone (model_name): {args.clip_model_name}, fusion_type: {args.fusion_type}")
     print(f"  - CLIP backbone params: {clip_params / 1e6:.3f} M, trainable: {clip_trainable / 1e6:.3f} M")
-    print(f"  - Classification head params: {head_params / 1e6:.3f} M, trainable: {head_trainable / 1e6:.3f} M")
-    print(f"  - Total parameters (CLIP + head): {total_params / 1e6:.3f} M, trainable: {total_trainable / 1e6:.3f} M")
+    print(f"  - clip_match head params: {head_params / 1e6:.3f} M, trainable: {head_trainable / 1e6:.3f} M")
+    print(f"  - Total parameters (CLIP + all heads): {total_params / 1e6:.3f} M, trainable: {total_trainable / 1e6:.3f} M")
 
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
