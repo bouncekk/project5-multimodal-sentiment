@@ -1,4 +1,5 @@
 import os
+import re
 import argparse
 from typing import Tuple
 
@@ -12,6 +13,25 @@ from PIL import Image
 
 LABEL2ID = {"negative": 0, "neutral": 1, "positive": 2}
 ID2LABEL = {v: k for k, v in LABEL2ID.items()}
+
+
+def clean_text(text: str) -> str:
+    """对原始文本做轻量清洗：
+
+    - 移除 URL、@用户名 等噪声
+    - 合并多余空白和换行
+    - 去掉首尾空白
+    """
+
+    # 去掉 URL
+    text = re.sub(r"https?://\S+", "", text)
+    # 去掉 @用户名
+    text = re.sub(r"@[A-Za-z0-9_\-]+", "", text)
+    # 将换行替换为空格
+    text = text.replace("\r", " ").replace("\n", " ")
+    # 合并多余空白
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 class ClipOpenAIDataset(Dataset):
@@ -62,7 +82,8 @@ class ClipOpenAIDataset(Dataset):
                 # 读取对应的文本内容，忽略无法用 UTF-8 解码的字符
                 if os.path.exists(text_path):
                     with open(text_path, "r", encoding="utf-8", errors="ignore") as tf:
-                        text = tf.read().strip()
+                        raw_text = tf.read()
+                        text = clean_text(raw_text)
                 else:
                     text = ""
 
@@ -302,11 +323,9 @@ def get_data_loaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader]:
     使用内部的 ClipOpenAIDataset，不再依赖 vocab.encode。
     """
 
-    # CLIPProcessor 自己会做 resize / center crop / normalize，这里只需基础变换
-    image_transform = transforms.Compose([
-        transforms.Resize((224, 224)),  # 保险起见先缩放到 224
-        transforms.ToTensor(),
-    ])
+    # 图像预处理更贴近 CLIP 官方配置：
+    # 保持图像为 PIL.Image，只做 Resize，归一化和 rescale 交给 CLIPProcessor 处理。
+    image_transform = transforms.Resize((224, 224))
 
     train_data_path = os.path.join(args.data_dir, "train.txt")
     dataset = ClipOpenAIDataset(
@@ -344,10 +363,8 @@ def get_data_loaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader]:
 def get_test_loader(args: argparse.Namespace) -> DataLoader:
     """构造用于无标签测试集 (test_without_label.txt) 的 DataLoader。"""
 
-    image_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-    ])
+    # 与训练集保持一致：仅对 PIL.Image 做 Resize，归一化和 rescale 由 CLIPProcessor 完成。
+    image_transform = transforms.Resize((224, 224))
 
     test_data_path = os.path.join(args.data_dir, "test_without_label.txt")
     dataset = ClipOpenAIDataset(
