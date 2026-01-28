@@ -177,20 +177,34 @@ class CLIPOpenAIWrapper(nn.Module):
         self.text_classifier = nn.Linear(embed_dim, 3)
         self.image_classifier = nn.Linear(embed_dim, 3)
 
-        # attention fusion：将 [t_hat, v_hat] 组成长度 2 的序列，过 TransformerEncoder
+        # attention fusion：将 [t_hat, v_hat] 组成长度 2 的序列，过更深的 TransformerEncoder
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=8,
             dim_feedforward=4 * embed_dim,
             dropout=0.1,
             batch_first=True,
+            activation="gelu",
         )
-        self.attn_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
+        # 稍微加深层数，加强跨模态交互能力
+        self.attn_encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
+
+        # 残差门控：在融合后的表示上加入一条来自文本特征 t_hat 的可学习门控残差
+        self.attn_gate = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim),
+            nn.Tanh(),
+        )
+
+        # 更强的分类头：LayerNorm + GELU + 两层 MLP
         self.attn_classifier = nn.Sequential(
+            nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, cls_hidden_dim),
-            nn.ReLU(inplace=True),
+            nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(cls_hidden_dim, 3),
+            nn.Linear(cls_hidden_dim, cls_hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(cls_hidden_dim // 2, 3),
         )
 
         # 纯文本 / 纯图像 模型的分类头（重新训练时只依赖单一模态特征）
@@ -255,7 +269,12 @@ class CLIPOpenAIWrapper(nn.Module):
             # attention fusion：长度为 2 的序列，经 TransformerEncoder 融合
             seq = torch.stack([t_hat, v_hat], dim=1)  # (B, 2, D)
             fused = self.attn_encoder(seq)
-            fused_cls = fused[:, 0]
+            fused_cls = fused[:, 0]  # (B, D)
+
+            # 计算门控权重，并加入来自文本特征的残差
+            gate = self.attn_gate(torch.cat([fused_cls, t_hat], dim=-1))  # (B, D)
+            fused_cls = fused_cls + gate * t_hat
+
             logits = self.attn_classifier(fused_cls)
 
         elif self.fusion_type == "text_only":
