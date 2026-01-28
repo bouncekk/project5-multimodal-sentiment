@@ -37,7 +37,10 @@ project5/
 ├── val_bad_cases_epoch10.csv      # 一次训练得到的验证集 bad case 列表示例
 ├── checkpoints*/                  # 各类模型的 checkpoint 输出目录
 ├── requirements.txt               # 依赖列表
+├── images/                        # 图片
 ├── 实验报告.md                    # 实验报告
+├── 实验报告.pdf                    # 实验报告
+└── results.txt                     # 结果文件
 └── README.md                      # 本说明文件
 ```
 
