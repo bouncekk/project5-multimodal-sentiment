@@ -5,15 +5,13 @@ from transformers import ViTModel, ViTConfig
 
 class ImageEncoder(nn.Module):
     """图像编码器，使用 Vision Transformer (ViT) 作为骨干网络。
-
-    默认使用 `google/vit-base-patch16-224-in21k` 的配置，可以选择是否加载预训练权重。
     """
 
     def __init__(self, model_name: str = "google/vit-base-patch16-224-in21k", pretrained: bool = True, train_backbone: bool = True):
         super().__init__()
 
         if pretrained:
-            # 优先尝试加载预训练权重；如果因无法访问 huggingface 等原因失败，则退回到本地随机初始化的 ViTConfig
+            # 优先尝试加载预训练权重
             try:
                 self.vit = ViTModel.from_pretrained(model_name)
             except Exception:
@@ -40,11 +38,9 @@ class ImageEncoder(nn.Module):
         返回:
         - features: (B, output_dim)，每张图像的一条 ViT 池化后的特征向量
         """
-        # ViTModel 期望输入参数名为 pixel_values
         outputs = self.vit(pixel_values=images)
         if outputs.pooler_output is not None:
-            feats = outputs.pooler_output  # (B, hidden_size)
+            feats = outputs.pooler_output  
         else:
-            # 如果没有 pooler，则对 patch 维做平均池化
             feats = outputs.last_hidden_state.mean(dim=1)
         return feats

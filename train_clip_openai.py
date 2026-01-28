@@ -16,13 +16,6 @@ ID2LABEL = {v: k for k, v in LABEL2ID.items()}
 
 
 def clean_text(text: str) -> str:
-    """对原始文本做轻量清洗：
-
-    - 移除 URL、@用户名 等噪声
-    - 合并多余空白和换行
-    - 去掉首尾空白
-    """
-
     # 去掉 URL
     text = re.sub(r"https?://\S+", "", text)
     # 去掉 @用户名
@@ -36,15 +29,6 @@ def clean_text(text: str) -> str:
 
 class ClipOpenAIDataset(Dataset):
     """专用于 OpenAI CLIP 的多模态情感数据集。
-
-    与原项目的 CSV 格式保持一致：
-        guid,label
-
-    对于每一条样本，读取：
-        data/{guid}.jpg   图像文件
-        data/{guid}.txt   文本文件（原始字符串）
-
-    不再依赖 vocab.encode，文本编码交给 CLIPProcessor 完成。
     """
 
     def __init__(
@@ -65,7 +49,6 @@ class ClipOpenAIDataset(Dataset):
                 line = line.strip()
                 if not line:
                     continue
-                # 跳过首行表头 "guid,label"
                 if first and ("," in line) and ("guid" in line):
                     first = False
                     continue
@@ -121,12 +104,6 @@ class ClipOpenAIDataset(Dataset):
 
 
 def clip_collate_fn(batch):
-    """自定义 collate_fn：
-
-    - 保持 images 为 PIL.Image 的列表，直接交给 CLIPProcessor 处理；
-    - 将 labels 堆叠为一个 LongTensor；
-    - 将 raw_texts 组成字符串列表。
-    """
 
     images = [item["images"] for item in batch]
     labels = torch.stack([item["labels"] for item in batch], dim=0)
@@ -155,7 +132,7 @@ class CLIPOpenAIWrapper(nn.Module):
         self.model_name = model_name
         self.fusion_type = fusion_type
 
-        # 优先尝试离线加载（只用本地缓存，不访问网络），避免在网络被拦截时长时间重试
+        # 优先尝试离线加载
         try:
             self.clip = CLIPModel.from_pretrained(model_name, local_files_only=True)
             self.processor = CLIPProcessor.from_pretrained(model_name, local_files_only=True)
@@ -171,14 +148,11 @@ class CLIPOpenAIWrapper(nn.Module):
                 f"然后重新运行本脚本。原始错误: {e}"
             )
 
-        # CLIP 默认投影后的文本/图像特征维度
         embed_dim = self.clip.config.projection_dim
         self.embed_dim = embed_dim
 
-        # 匹配特征维度：t_hat, v_hat, |t-v|, t*v, cos
         match_dim = 4 * embed_dim + 1
 
-        # clip_match 融合头（保持与原实现一致）
         self.clip_classifier = nn.Sequential(
             nn.Linear(match_dim, cls_hidden_dim),
             nn.ReLU(inplace=True),
@@ -186,7 +160,6 @@ class CLIPOpenAIWrapper(nn.Module):
             nn.Linear(cls_hidden_dim, 3),
         )
 
-        # early fusion：简单拼接 t_hat, v_hat 后做 MLP
         self.early_classifier = nn.Sequential(
             nn.Linear(2 * embed_dim, cls_hidden_dim),
             nn.ReLU(inplace=True),
@@ -194,11 +167,9 @@ class CLIPOpenAIWrapper(nn.Module):
             nn.Linear(cls_hidden_dim, 3),
         )
 
-        # late fusion：分别对文本/图像做分类，再对 logits 取平均
         self.text_classifier = nn.Linear(embed_dim, 3)
         self.image_classifier = nn.Linear(embed_dim, 3)
 
-        # attention fusion：将 [t_hat, v_hat] 组成长度 2 的序列，过更深的 TransformerEncoder
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=8,
@@ -228,7 +199,6 @@ class CLIPOpenAIWrapper(nn.Module):
             nn.Linear(cls_hidden_dim // 2, 3),
         )
 
-        # 纯文本 / 纯图像 模型的分类头（重新训练时只依赖单一模态特征）
         self.text_only_classifier = nn.Sequential(
             nn.Linear(embed_dim, cls_hidden_dim),
             nn.ReLU(inplace=True),
@@ -247,8 +217,6 @@ class CLIPOpenAIWrapper(nn.Module):
         """输入原始文本列表和图像张量 (B, 3, H, W)。"""
         device = next(self.parameters()).device
 
-        # CLIPProcessor 可以直接吃 text list + PIL.Image 列表或张量。
-        # 为避免 "sequence length > max_position_embeddings" 的报错，这里显式截断文本到模型允许的最大长度。
         max_txt_len = self.clip.config.text_config.max_position_embeddings
 
         inputs = self.processor(
@@ -268,7 +236,6 @@ class CLIPOpenAIWrapper(nn.Module):
         v_hat = nn.functional.normalize(image_embeds, dim=-1)
 
         if self.fusion_type == "clip_match":
-            # 与原实现相同的 clip_match 特征
             cos = (t_hat * v_hat).sum(dim=-1, keepdim=True)
             diff = torch.abs(t_hat - v_hat)
             prod = t_hat * v_hat
@@ -276,38 +243,31 @@ class CLIPOpenAIWrapper(nn.Module):
             logits = self.clip_classifier(match_feat)
 
         elif self.fusion_type == "early":
-            # early fusion：直接拼接文本/图像特征
             feat = torch.cat([t_hat, v_hat], dim=-1)
             logits = self.early_classifier(feat)
 
         elif self.fusion_type == "late":
-            # late fusion：分别做分类，再对 logits 取平均
             logits_t = self.text_classifier(t_hat)
             logits_v = self.image_classifier(v_hat)
             logits = (logits_t + logits_v) / 2.0
 
         elif self.fusion_type == "attn":
-            # attention fusion：长度为 2 的序列，经 TransformerEncoder 融合
-            seq = torch.stack([t_hat, v_hat], dim=1)  # (B, 2, D)
+            seq = torch.stack([t_hat, v_hat], dim=1)  
             fused = self.attn_encoder(seq)
-            fused_cls = fused[:, 0]  # (B, D)
+            fused_cls = fused[:, 0]  
 
-            # 计算门控权重，并加入来自文本特征的残差
-            gate = self.attn_gate(torch.cat([fused_cls, t_hat], dim=-1))  # (B, D)
+            gate = self.attn_gate(torch.cat([fused_cls, t_hat], dim=-1)) 
             fused_cls = fused_cls + gate * t_hat
 
             logits = self.attn_classifier(fused_cls)
 
         elif self.fusion_type == "text_only":
-            # 纯文本模型：只使用文本特征进行分类
             logits = self.text_only_classifier(t_hat)
 
         elif self.fusion_type == "image_only":
-            # 纯图像模型：只使用图像特征进行分类
             logits = self.image_only_classifier(v_hat)
 
         else:
-            # 未知类型时退回 clip_match，避免崩溃
             cos = (t_hat * v_hat).sum(dim=-1, keepdim=True)
             diff = torch.abs(t_hat - v_hat)
             prod = t_hat * v_hat
@@ -319,12 +279,8 @@ class CLIPOpenAIWrapper(nn.Module):
 
 def get_data_loaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader]:
     """构造专用于 OpenAI CLIP 的 DataLoader。
-
-    使用内部的 ClipOpenAIDataset，不再依赖 vocab.encode。
     """
 
-    # 图像预处理更贴近 CLIP 官方配置：
-    # 保持图像为 PIL.Image，只做 Resize，归一化和 rescale 交给 CLIPProcessor 处理。
     image_transform = transforms.Resize((224, 224))
 
     train_data_path = os.path.join(args.data_dir, "train.txt")
@@ -340,8 +296,6 @@ def get_data_loaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader]:
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-    # 默认的 collate_fn 即可：
-    #  - 这里改为使用 clip_collate_fn，保持 images 为 PIL.Image 列表，labels 为张量
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -363,7 +317,6 @@ def get_data_loaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader]:
 def get_test_loader(args: argparse.Namespace) -> DataLoader:
     """构造用于无标签测试集 (test_without_label.txt) 的 DataLoader。"""
 
-    # 与训练集保持一致：仅对 PIL.Image 做 Resize，归一化和 rescale 由 CLIPProcessor 完成。
     image_transform = transforms.Resize((224, 224))
 
     test_data_path = os.path.join(args.data_dir, "test_without_label.txt")
@@ -392,8 +345,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
     total = 0
 
     for batch in tqdm(loader, desc="Train"):
-        # 我们自定义的 Dataset 已经返回 images(list[PIL]) / labels(tensor) / raw_texts
-        images = batch["images"]          # list of PIL.Image.Image, 由 CLIPProcessor 处理并移动到 device
+        images = batch["images"]          
         labels = batch["labels"].to(device)
         texts = batch["raw_texts"]
 
@@ -425,7 +377,7 @@ def evaluate(model, loader, criterion, device, log_badcase_path: str | None = No
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="Val"):
-            images = batch["images"]          # list of PIL.Image.Image
+            images = batch["images"]         
             labels = batch["labels"].to(device)
             texts = batch["raw_texts"]
 
@@ -455,7 +407,6 @@ def evaluate(model, loader, criterion, device, log_badcase_path: str | None = No
 
 def evaluate_ablation(model, loader, device, mode: str):
     """在验证集上做消融实验：
-
     mode:
         - "full": 正常多模态
         - "text_only": 文本单模态（图像信息被抹掉）
@@ -470,22 +421,19 @@ def evaluate_ablation(model, loader, device, mode: str):
 
     with torch.no_grad():
         for batch in tqdm(loader, desc=f"Val[{mode}]"):
-            images = batch["images"]          # list of PIL.Image.Image
+            images = batch["images"]         
             labels = batch["labels"].to(device)
             texts = batch["raw_texts"]
 
             if mode == "text_only":
-                # 文本单模态：把图像变成固定尺寸的纯黑图，尽量抹掉视觉信息
                 from PIL import Image as _Image
 
                 dummy_images = []
                 for _ in images:
-                    # 这里不依赖原始 img.size（可能是 tensor），直接使用与预处理一致的 224x224 尺寸
                     dummy_images.append(_Image.new("RGB", (224, 224), (0, 0, 0)))
                 images = dummy_images
 
             elif mode == "image_only":
-                # 图像单模态：把文本替换为无信息的空字符串
                 texts = ["" for _ in texts]
 
             logits = model(texts, images)
@@ -515,15 +463,12 @@ def parse_args():
     parser.add_argument("--clip_model_name", type=str, default="openai/clip-vit-base-patch32")
     parser.add_argument("--cls_hidden_dim", type=int, default=512)
 
-    # 融合方式：clip_match（默认）、early、late、attn 以及纯文本 / 纯图像
     parser.add_argument("--fusion_type", type=str, default="clip_match",
                         choices=["clip_match", "early", "late", "attn", "text_only", "image_only"],
                         help="Fusion strategy on top of OpenAI CLIP embeddings (including text_only / image_only variants)")
 
-    # 推理相关参数（仅在 --do_infer 时使用）
     parser.add_argument("--do_infer", action="store_true", help="Run inference on test_without_label.txt instead of training")
     parser.add_argument("--ckpt_path", type=str, default=None, help="Path to a saved CLIPOpenAIWrapper checkpoint for inference/ablation eval")
-    # 消融验证：在验证集上分别进行 full / text-only / image-only 评估
     parser.add_argument("--do_ablation_eval", action="store_true", help="Run ablation evaluation (full/text-only/image-only) on validation set using a trained checkpoint")
     parser.add_argument("--output_path", type=str, default="submission_clip_openai.txt", help="Output file for test predictions (guid,label)")
 
@@ -577,7 +522,6 @@ def main():
                 preds = logits.argmax(dim=-1).cpu().tolist()
 
                 for guid_path, pred_id in zip(image_paths, preds):
-                    # guid 形如 "data/xxx.jpg"，取出中间的文件名部分去掉扩展名
                     guid = os.path.splitext(os.path.basename(guid_path))[0]
                     label_str = ID2LABEL.get(pred_id, "neutral")
                     fw.write(f"{guid},{label_str}\n")
@@ -602,11 +546,8 @@ def main():
         ).to(device)
         model.load_state_dict(ckpt["model_state"], strict=True)
 
-        # full 多模态
         acc_full = evaluate_ablation(model, val_loader, device, mode="full")
-        # 仅文本
         acc_text = evaluate_ablation(model, val_loader, device, mode="text_only")
-        # 仅图像
         acc_image = evaluate_ablation(model, val_loader, device, mode="image_only")
 
         print("[AblationEval] Validation accuracy:")
@@ -616,7 +557,6 @@ def main():
 
         return
 
-    # 训练模式（默认）：与原先逻辑保持不变
     train_loader, val_loader = get_data_loaders(args)
 
     model = CLIPOpenAIWrapper(
@@ -632,7 +572,6 @@ def main():
     clip_params = sum(p.numel() for p in model.clip.parameters())
     clip_trainable = sum(p.numel() for p in model.clip.parameters() if p.requires_grad)
 
-    # 这里只粗略统计 clip_match 头的参数量，其他 head 相比于 backbone 只增加少量参数
     head_params = sum(p.numel() for p in model.clip_classifier.parameters())
     head_trainable = sum(p.numel() for p in model.clip_classifier.parameters() if p.requires_grad)
 

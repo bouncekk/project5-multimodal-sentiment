@@ -8,7 +8,7 @@ venv/
 .project5/
 .project5-env/
 
-# Checkpoints / logs (按需添加)
+# Checkpoints / logs 
 checkpoints/
 
 models--google--vit-base-patch16-224-in21k/

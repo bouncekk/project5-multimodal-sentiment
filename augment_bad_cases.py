@@ -6,12 +6,12 @@ from typing import List
 from PIL import Image, ImageEnhance
 
 
-DATA_DIR = "."  # 以当前目录为根，即包含 train.txt、data/ 等的目录
+DATA_DIR = "."  
 BADCASE_CSV = os.path.join(DATA_DIR, "val_bad_cases_epoch10.csv")
 TRAIN_FILE = os.path.join(DATA_DIR, "train.txt")
 DATA_FOLDER = os.path.join(DATA_DIR, "data")
 
-# 每个 bad case 生成多少个增强样本（可以按需调整）
+# 每个 bad case 生成多少个增强样本
 N_TEXT_AUG_PER_SAMPLE = 1
 N_IMAGE_AUG_PER_SAMPLE = 1
 
@@ -31,7 +31,6 @@ def load_bad_cases(path: str) -> List[tuple]:
 
 def simple_text_augment(text: str) -> str:
     """非常简单的中文情感文本增强：插入/替换一些语气词，保持语义不变。
-    这里只做极轻量的随机处理，避免引入反向标签。
     """
     fillers = ["其实", "真的", "就是", "有点", "有点儿", "还挺", "非常", "特别"]
     # 按句号/叹号分句，随机在句子前面插入一些语气词

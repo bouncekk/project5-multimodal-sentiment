@@ -17,10 +17,6 @@ ID2LABEL = {v: k for k, v in LABEL2ID.items()}
 
 class ViLBERTDataset(Dataset):
     """专用于 ViLBERT 风格模型的多模态情感数据集。
-
-    读取 train.txt / test_without_label.txt，格式：guid,label 或 guid,null。
-    根据 guid 从 data/{guid}.jpg 和 data/{guid}.txt 加载图像和原始文本。
-    文本编码交给 BERT tokenizer，图像预处理交给 torchvision.transforms。
     """
 
     def __init__(
@@ -119,13 +115,6 @@ def vilbert_collate_fn(batch, tokenizer, max_text_len: int):
 
 class ViLBERTLikeModel(nn.Module):
     """简化版 ViLBERT 风格多模态模型。
-
-    - 文本编码：BERT CLS 向量 (batch, d)
-    - 图像编码：ViT pooled 输出 (batch, d_img)，投影到 d
-    - 融合：将 [text_cls, image_feat] 拼接为序列长度 2，经 TransformerEncoder 融合
-    - 分类：对融合后第一个 token (对应 text) 做三分类
-
-    注意：这是一个简化版的 ViLBERT 风格 cross-modal Transformer，而不是官方权重。
     """
 
     def __init__(
@@ -164,18 +153,15 @@ class ViLBERTLikeModel(nn.Module):
         )
 
     def forward(self, input_ids, attention_mask, images):
-        # 文本编码
         text_outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        text_cls = text_outputs.last_hidden_state[:, 0]  # (B, hidden_dim)
+        text_cls = text_outputs.last_hidden_state[:, 0]  
 
-        # 图像编码
         img_outputs = self.vit(images)
-        img_feat = img_outputs.pooler_output  # (B, img_hidden)
-        img_feat = self.img_proj(img_feat)    # (B, hidden_dim)
+        img_feat = img_outputs.pooler_output  
+        img_feat = self.img_proj(img_feat)    
 
-        # 构造长度为 2 的序列：[text_cls, img_feat]
-        fused_seq = torch.stack([text_cls, img_feat], dim=1)  # (B, 2, hidden_dim)
-        fused_out = self.fusion_encoder(fused_seq)            # (B, 2, hidden_dim)
+        fused_seq = torch.stack([text_cls, img_feat], dim=1)  
+        fused_out = self.fusion_encoder(fused_seq)            
 
         fused_cls = fused_out[:, 0]  # 取第一个 token 作为融合后的表示
         logits = self.classifier(fused_cls)

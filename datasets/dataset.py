@@ -8,9 +8,6 @@ from PIL import Image
 
 class Vocab:
     """非常简单的词表，用于将文本分词并映射到 id。
-
-    这里只是一个占位实现。在真实项目中，你通常会使用预训练分词器
-    （例如 BERT tokenizer）。这里为了简化，只按空格切分。
     """
 
     def __init__(self, specials: Optional[List[str]] = None):
@@ -58,15 +55,6 @@ class Vocab:
 
 class MultimodalSentimentDataset(Dataset):
     """多模态（文本 + 图像）情感分类数据集。
-
-    期望的 `train.txt` 格式（CSV，逗号分隔）:
-        guid,label
-    其中 label 取值为 {positive, neutral, negative} 之一，对应 data 目录下的:
-        data/{guid}.jpg   图像文件
-        data/{guid}.txt   文本文件
-
-    对于 `test_without_label.txt`（没有标签）:
-        guid,null
     """
 
     LABEL2ID = {"negative": 0, "neutral": 1, "positive": 2}

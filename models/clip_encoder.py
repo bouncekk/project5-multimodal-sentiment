@@ -7,9 +7,6 @@ from .image_encoder import ImageEncoder
 
 class CLIPTextEncoder(nn.Module):
     """基于现有 TextEncoder 的 CLIP 风格文本编码器。
-
-    内部复用当前的 TextEncoder，然后通过一个线性投影层将文本特征映射到统一的对齐维度，
-    便于与图像特征进行余弦相似度计算和匹配特征构造。
     """
 
     def __init__(self, vocab_size: int, text_embed_dim: int, text_hidden_dim: int, proj_dim: int):
@@ -34,7 +31,6 @@ class CLIPTextEncoder(nn.Module):
 
 class CLIPImageEncoder(nn.Module):
     """基于现有 ImageEncoder 的 CLIP 风格图像编码器。
-
     内部复用当前的 ViT 图像编码器，然后通过一个线性投影层将图像特征映射到统一的对齐维度。
     """
 

@@ -22,7 +22,6 @@ ID2LABEL = {v: k for k, v in LABEL2ID.items()}
 
 def build_vocab_from_file(train_file: str, max_samples: int = 100000) -> Vocab:
     """根据 CSV 格式的 train.txt (guid,tag) 构建词表。
-
     这里会使用 guid 到 data/{guid}.txt 中读取文本内容来统计词频。
     """
     texts = []
@@ -61,16 +60,11 @@ def build_vocab_from_file(train_file: str, max_samples: int = 100000) -> Vocab:
 
 def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
     """根据 model_type 和 fusion_type 构建模型结构。
-
-    - model_type = "bert_vit": 使用 TextEncoder + ImageEncoder (ViT)
-    - model_type = "clip":     使用 CLIPTextEncoder + CLIPImageEncoder，并支持 clip_match 融合
     """
 
-    # 统一的对齐维度，用于 BERT/ViT 或 CLIP 投影后对齐
     proj_dim = args.fusion_hidden_dim
 
     if args.model_type == "clip":
-        # CLIP 风格：复用现有编码器，再投影到统一维度
         text_encoder = CLIPTextEncoder(
             vocab_size=vocab.size,
             text_embed_dim=args.text_embed_dim,
@@ -83,7 +77,6 @@ def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
             train_backbone=True,
         )
     else:
-        # 默认 BERT+ViT：通过 text_hidden_dim 和 text_num_layers 控制文本编码器容量
         text_encoder = TextEncoder(
             vocab_size=vocab.size,
             embed_dim=args.text_embed_dim,
@@ -94,9 +87,7 @@ def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
 
     fusion = FusionModule(text_dim=text_encoder.output_dim, image_dim=image_encoder.output_dim, hidden_dim=args.fusion_hidden_dim)
 
-    # 根据实验模态和融合方式动态确定分类器结构
     if args.fusion_type == "late":
-        # late fusion: 为文本和图像各自构建一个分类头，最终在 logit 级别平均
         classifier_text = Classifier(input_dim=text_encoder.output_dim, num_classes=3, hidden_dim=args.cls_hidden_dim)
         classifier_image = Classifier(input_dim=image_encoder.output_dim, num_classes=3, hidden_dim=args.cls_hidden_dim)
         main_classifier = None
@@ -113,11 +104,10 @@ def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
             classifier_input_dim = text_encoder.output_dim
         elif args.modality == "image_only":
             classifier_input_dim = image_encoder.output_dim
-        else:  # both
+        else:  
             if args.fusion_type == "early":
-                # early fusion: 直接拼接 text_feat 和 img_feat
                 classifier_input_dim = text_encoder.output_dim + image_encoder.output_dim
-            else:  # cross_attn
+            else:  
                 classifier_input_dim = fusion.output_dim
 
         main_classifier = Classifier(input_dim=classifier_input_dim, num_classes=3, hidden_dim=args.cls_hidden_dim)
@@ -161,7 +151,6 @@ def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
                     fused = torch.cat([text_feat, img_feat], dim=-1)
                     logits = self.main_classifier(fused)
                 elif self.fusion_type == "clip_match":
-                    # CLIP 匹配特征：使用归一化后的特征构造匹配向量
                     t_hat = torch.nn.functional.normalize(text_feat, dim=-1)
                     v_hat = torch.nn.functional.normalize(img_feat, dim=-1)
                     cos = (t_hat * v_hat).sum(dim=-1, keepdim=True)
@@ -169,7 +158,7 @@ def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
                     prod = t_hat * v_hat
                     fused = torch.cat([t_hat, v_hat, diff, prod, cos], dim=-1)
                     logits = self.main_classifier(fused)
-                else:  # late fusion
+                else:  
                     logits_text = self.classifier_text(text_feat)
                     logits_image = self.classifier_image(img_feat)
                     logits = (logits_text + logits_image) / 2.0
@@ -180,7 +169,6 @@ def build_model(vocab: Vocab, args: argparse.Namespace) -> nn.Module:
 
 
 def get_data_loaders(args: argparse.Namespace, vocab: Vocab) -> Tuple[DataLoader, DataLoader]:
-    # ViT 期望输入经过标准化，这里在训练阶段加入轻量图像增强
     image_transform = transforms.Compose([
         transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),  # 随机裁剪并缩放到 224x224
         transforms.RandomHorizontalFlip(p=0.5),               # 随机水平翻转
@@ -327,7 +315,7 @@ def main():
     train_loader, val_loader = get_data_loaders(args, vocab)
     model = build_model(vocab, args).to(device)
 
-    # 打印模型参数量，便于不同模型/融合方式的公平对比
+    # 打印模型参数量
     num_params = sum(p.numel() for p in model.parameters())
     num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model type: {args.model_type}, fusion_type: {args.fusion_type}, modality: {args.modality}")
