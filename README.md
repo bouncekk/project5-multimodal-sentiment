@@ -238,6 +238,13 @@ python train_clip_openai.py --data_dir . --save_dir checkpoints_clip_openai_attn
 - 分类头：  
   - cls_hidden_dim 512  
 
+## 实验可复现性说明
+
+- 固定随机性设置：所有训练脚本默认使用 `seed=42`，并在 PyTorch 中设置随机种子。
+- 统一训练超参数：关键超参数已在「模型超参数」一节中列出。
+- 固定预训练权重版本：BERT / ViT / CLIP 的离线 snapshot 路径在 README 中给出，训练命令示例中通过 `--bert_name` / `--vit_name` / `--clip_model_name` 显式指定，避免因下载到不同版本模型产生偏差。
+
+
 ## 模型结果
 
 ### 不同模型架构对比（相近参数量）
